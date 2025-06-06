@@ -1,279 +1,252 @@
-# LED Gauge Library for ESPHome
+# ESP32 LED Gauge - Environmental Monitor
 
-A reusable LED gauge effect library for ESPHome that displays values as a colored gauge with animated wave effects. This library leverages ESPHome's built-in helper functions for optimal integration.
+An ESP32-based environmental monitoring device that displays CO₂, temperature, and humidity data from an SCD41 sensor, plus Aare river temperature, using a colorful LED strip gauge with animated wave effects.
+
+> [!IMPORTANT]
+> This project is currently in development and may not be fully functional.
 
 ## Features
 
-- Display any value (0.0 to 1.0) as a lit portion of an LED strip
-- Customizable three-color gradient
-- Animated traveling wave effect with adjustable speed
-- Supports both forward and reverse wave directions
-- Easy integration with ESPHome sensors
-- Leverages ESPHome's Color class operators for efficient color manipulation
+- **SCD41 Sensor Integration**: Monitors CO₂ (ppm), temperature (°C), and humidity (%)
+- **Aare River Data**: Fetches current temperature from aare.guru API
+- **Visual LED Gauge**: 12-LED WS2812 strip with animated wave effects
+- **Multiple Display Modes**: Switch between CO₂, temperature, humidity, and Aare temperature
+- **Home Assistant Integration**: Full ESPHome integration with configurable parameters
+- **Web Interface**: Built-in web server for local monitoring
+- **WireGuard VPN**: Secure remote access capability
+
+## Images
+
+<table>
+  <tr>
+    <td><img src="images/IMG_3400.jpeg" width="250" alt="LED Gauge Device"></td>
+    <td><img src="images/IMG_3401.jpeg" width="250" alt="Device in Action"></td>
+    <td><img src="images/IMG_3406.jpeg" width="250" alt="Different Display Modes"></td>
+  </tr>
+</table>
+
+## Hardware
+
+- **MCU**: ESP32 (ESP32-DevKit-C or similar)
+- **Sensor**: SCD41 CO₂/Temperature/Humidity sensor (I2C)
+- **LED Strip**: 12x WS2812 RGB LEDs (NeoPixel compatible)
+- **Connectivity**: Wi-Fi with WireGuard VPN support
+
+### Wiring
+
+- **SCD41 Sensor**:
+  - SDA → GPIO21
+  - SCL → GPIO22
+  - VCC → 3.3V
+  - GND → GND
+
+- **LED Strip**:
+  - Data → GPIO12
+  - VCC → 5V
+  - GND → GND
+
+## Software Architecture
+
+### Core Components
+
+1. **LED Gauge Library** (`led_gauge.h`): Custom C++ library for rendering gauge effects
+2. **ESPHome Configuration** (`led_gauge.yaml`): Main device configuration
+3. **API Integration**: HTTP client for Aare river data
+4. **Sensor Management**: SCD41 driver with trend calculation
+
+### Display Modes
+
+#### 1. CO₂ Gauge (Default)
+- **Range**: 400-2000 ppm
+- **Colors**: Green → Yellow → Red
+- **Animation**: Slow wave (0.3 speed)
+- **Thresholds**:
+  - Good: < 800 ppm (Green)
+  - Moderate: 800-1200 ppm (Yellow)
+  - Poor: > 1200 ppm (Red)
+
+#### 2. Temperature Gauge
+- **Range**: 15-30°C
+- **Colors**: Blue → Cyan → Red
+- **Animation**: Medium wave (0.5 speed)
+
+#### 3. Humidity Gauge
+- **Range**: 30-70% RH
+- **Colors**: Orange → Blue → Purple
+- **Animation**: Fast wave (0.7 speed)
+
+#### 4. Aare Temperature Gauge
+- **Range**: 0-25°C
+- **Colors**: Deep Blue → Cyan → Warm White
+- **Animation**: Gentle wave (0.4 speed)
+- **Data Source**: [aare.guru API](https://aare.guru/)
 
 ## Installation
 
-1. Copy `led_gauge.h` to your ESPHome configuration directory
-2. Include it in your YAML configuration:
+### 1. Hardware Setup
+Wire the components as described in the Hardware section above.
+
+### 2. ESPHome Configuration
+
+1. Copy the project files to your ESPHome directory
+2. Create a `secrets.yaml` file with your credentials:
 
 ```yaml
-esphome:
-  includes:
-    - led_gauge.h
+wifi_ssid: "YourWiFiNetwork"
+wifi_password: "YourWiFiPassword"
+api_encryption: "your-32-character-api-key"
+ota_password: "your-ota-password"
 ```
 
-## Usage
+3. Compile and upload to your ESP32:
 
-### Basic Usage
+```bash
+esphome compile led_gauge.yaml
+esphome upload led_gauge.yaml
+```
 
-The library provides two main functions:
+### 3. Home Assistant Integration
 
-#### `led_gauge()`
-Full control over all parameters including timing:
+The device automatically appears in Home Assistant via ESPHome integration. You'll get:
+
+**Sensors:**
+- CO₂ Level (ppm)
+- Temperature (°C)
+- Humidity (%)
+- Aare Temperature (°C)
+- Aare Flow (m³/s)
+- Aare Height (m)
+
+**Controls:**
+- Gauge mode selection
+- Color customization (RGB values for each gradient point)
+- Animation speed control
+- Min/max value adjustment
+- Manual data refresh button
+
+## LED Gauge Library
+
+The custom `led_gauge.h` library provides smooth gradient rendering with traveling wave animations:
+
+### Key Features
+- **Three-color gradients** with smooth interpolation
+- **Wave animation** with configurable speed and direction
+- **ESPHome integration** using native Color class operations
+- **Optimized performance** for real-time updates at 50ms intervals
+
+### Usage Example
 
 ```cpp
-led_gauge(it, value, c1, c2, c3, wave_speed, phase, dt);
+// CO₂ visualization
+float co2_normalized = (co2_value - 400.0) / (2000.0 - 400.0);
+Color green(0, 255, 0);
+Color yellow(255, 255, 0);
+Color red(255, 0, 0);
+led_gauge_simple(it, co2_normalized, green, yellow, red, 0.3);
 ```
 
-Parameters:
-- `it`: The addressable light iterator
-- `value`: Gauge value from 0.0 to 1.0
-- `c1`, `c2`, `c3`: Three colors for the gradient
-- `wave_speed`: Animation speed from -1.0 to 1.0 (negative for reverse)
-- `phase`: Reference to phase accumulator (for animation continuity)
-- `dt`: Time delta since last update in seconds
+## API Integration
 
-#### `led_gauge_simple()`
-Simplified version that manages timing internally:
+### Aare River Data
+The device fetches real-time data from the aare.guru API every 5 minutes:
 
-```cpp
-led_gauge_simple(it, value, c1, c2, c3, wave_speed);
-```
+- **Temperature**: Current water temperature
+- **Flow**: Water flow rate in m³/s
+- **Height**: Water level in meters
+- **Status**: Text descriptions (e.g., "Perfect for swimming")
 
-### Example: CO₂ Monitor
+API endpoint: `https://aareguru.existenz.ch/v2018/current`
 
-```yaml
-light:
-  - platform: neopixelbus
-    type: GRB
-    variant: WS2812
-    pin: GPIO12
-    num_leds: 12
-    name: "CO2 Indicator"
-    id: led_strip
-    effects:
-      - addressable_lambda:
-          name: "CO₂"
-          update_interval: 50ms
-          lambda: |-
-            // Normalize CO₂ value to 0-1 range
-            float value = id(co2_sensor).state;
-            float normalized = (value - 400.0) / (2000.0 - 400.0);
-            
-            // Green → Yellow → Red gradient
-            Color c1(0, 255, 0);
-            Color c2(255, 255, 0);
-            Color c3(255, 0, 0);
-            
-            // Slow wave for steady values
-            led_gauge_simple(it, normalized, c1, c2, c3, 0.3);
-```
+## Configuration Options
 
-### Example: Temperature Gauge
+### Customizable Parameters (via Home Assistant)
 
-```yaml
-- addressable_lambda:
-    name: "Temperature"
-    update_interval: 50ms
-    lambda: |-
-      // Map temperature to 0-1 range (e.g., 0°C to 40°C)
-      float temp = id(temperature).state;
-      float normalized = (temp - 0.0) / 40.0;
-      
-      // Blue → Cyan → Red gradient
-      Color cold(0, 0, 255);
-      Color moderate(0, 255, 255);
-      Color hot(255, 0, 0);
-      
-      led_gauge_simple(it, normalized, cold, moderate, hot, 0.5);
-```
+**Gauge Ranges:**
+- CO₂ Min/Max values
+- Temperature Min/Max values
+- Humidity Min/Max values
+- Aare Temperature Min/Max values
 
-### Example: Dynamic Wave Speed Based on Trend
+**Visual Settings:**
+- Color 1, 2, 3 for each gauge mode (RGB values)
+- Wave animation speed (-1.0 to 1.0)
+- Update intervals
 
-```yaml
-- addressable_lambda:
-    name: "Dynamic Gauge"
-    update_interval: 50ms
-    lambda: |-
-      static float phase = 0.0;
-      
-      // Get value and trend
-      float value = id(sensor).state;
-      float trend = id(sensor_trend);
-      
-      // Normalize value using ESPHome's clamp helper
-      float normalized = clamp((value - id(min_val)) / (id(max_val) - id(min_val)), 0.0f, 1.0f);
-            
-      // Map trend to wave speed
-      float wave_speed = clamp(trend / 50.0, -1.0f, 1.0f);
-      
-      // Time delta
-      unsigned long now = millis();
-      static unsigned long last_update = 0;
-      float dt = (now - last_update) / 1000.0;
-      last_update = now;
-      
-      // Custom colors
-      Color c1(255, 255, 255);  // White
-      Color c2(128, 0, 255);    // Purple
-      Color c3(255, 0, 128);    // Pink
-      
-      led_gauge(it, normalized, c1, c2, c3, wave_speed, phase, dt);
-```
-
-## Color Schemes
-
-### Suggested color gradients:
-
-- **Air Quality**: Green → Yellow → Red
-- **Temperature**: Blue → Cyan → Red  
-- **Humidity**: White → Blue → Purple
-- **Battery**: Red → Yellow → Green
-- **Volume**: Blue → Cyan → White
-- **Speed**: Green → Yellow → Orange
+**Network:**
+- Wi-Fi credentials
+- WireGuard VPN configuration
+- Static IP assignment
 
 ## Advanced Features
 
-### Multiple Modes
+### Trend Calculation
+The device calculates value trends and can adjust wave speed based on rate of change:
 
-You can create a multi-mode gauge that switches between different sensors:
+```cpp
+// Wave speed based on CO₂ trend
+float trend = (current_co2 - previous_co2) / time_delta;
+float wave_speed = clamp(trend / 50.0, -1.0f, 1.0f);
+```
+
+### WireGuard VPN
+Secure remote access is configured for safe monitoring away from home network.
+
+### Web Server
+Access the device directly at its IP address for:
+- Real-time sensor readings
+- Manual gauge mode switching
+- Network diagnostics
+- Log viewing
+
+## Troubleshooting
+
+### Common Issues
+
+**LED strip not working:**
+- Check GPIO12 connection
+- Verify 5V power supply
+- Ensure common ground between ESP32 and LED strip
+
+**SCD41 sensor not detected:**
+- Verify I2C connections (GPIO21/22)
+- Check sensor power (3.3V)
+- Use I2C scanner to detect device address (0x62)
+
+**API requests failing:**
+- Check Wi-Fi connection
+- Verify internet access
+- Monitor logs for HTTP error codes
+
+**Home Assistant not discovering device:**
+- Ensure API encryption key matches
+- Check network connectivity
+- Restart ESPHome device
+
+### Logs and Debugging
+
+Enable verbose logging in `led_gauge.yaml`:
 
 ```yaml
-globals:
-  - id: mode
-    type: int
-    initial_value: '0'
-  - id: pulse_phase
-    type: float
-    initial_value: '0.0'
-
-effects:
-  - addressable_lambda:
-      name: "Multi Gauge"
-      update_interval: 50ms
-      lambda: |-
-        float value, vmin, vmax;
-        Color c1, c2, c3;
-        
-        // Select mode
-        if (id(mode) == 0) {
-          // CO₂ mode
-          value = id(co2_sensor).state;
-          vmin = 400; vmax = 2000;
-          c1 = Color(0, 255, 0);
-          c2 = Color(255, 255, 0);
-          c3 = Color(255, 0, 0);
-        } else if (id(mode) == 1) {
-          // Temperature mode
-          value = id(temp_sensor).state;
-          vmin = 0; vmax = 40;
-          c1 = Color(0, 0, 255);
-          c2 = Color(0, 255, 255);
-          c3 = Color(255, 0, 0);
-        }
-        
-        float normalized = (value - vmin) / (vmax - vmin);
-        led_gauge_simple(it, normalized, c1, c2, c3, 0.4);
+logger:
+  level: DEBUG
+  logs:
+    aare: DEBUG
+    sensor: DEBUG
+    light: DEBUG
 ```
 
-## Integration with Home Assistant
+## Contributing
 
-The gauge can be controlled from Home Assistant using template numbers:
-
-```yaml
-number:
-  - platform: template
-    name: "Gauge Min Value"
-    id: gauge_min
-    min_value: 0
-    max_value: 1000
-    initial_value: 400
-    step: 10
-    optimistic: true
-    restore_value: true
-
-  - platform: template
-    name: "Gauge Max Value"
-    id: gauge_max
-    min_value: 1000
-    max_value: 5000
-    initial_value: 2000
-    step: 10
-    optimistic: true
-    restore_value: true
-```
-
-## Tips
-
-1. Use `update_interval: 50ms` for smooth animations
-2. Keep wave_speed between -0.5 and 0.5 for subtle effects
-3. Use contrasting colors for better visibility
-4. The library uses ESPHome's built-in `clamp()`, `lerp()`, and `remap()` helpers for value manipulation
-5. Store phase as a global or static variable for smooth animations
-6. All values are automatically clamped to their valid ranges
-7. The `led_gauge_simple()` function uses static variables and is not thread-safe - use only one instance per device
-8. Division by zero is handled automatically when normalizing values (returns 0.0 if min equals max)
-
-## Configuration Constants
-
-The library defines the following constants that control the wave effect:
-
-- `WAVE_CYCLES`: Number of wave cycles across the strip (default: 4.0)
-- `MIN_BRIGHTNESS`: Minimum brightness factor for the wave effect (default: 0.6)
-- `MAX_BRIGHTNESS`: Maximum brightness factor for the wave effect (default: 1.0)
-
-These create a wave that oscillates between 60% and 100% brightness with 4 complete cycles across the LED strip.
-
-## Color Class Operations
-
-The LED gauge library uses ESPHome's Color class, which provides several useful operators:
-
-### Multiplication (Dimming/Brightness)
-```cpp
-Color dimmed = base_color * 128;  // 50% brightness
-Color off = base_color * 0;       // Completely off
-```
-
-### Addition (Color Mixing)
-```cpp
-Color yellow = Color(255, 0, 0) + Color(0, 255, 0);  // Red + Green
-Color white = Color(85, 85, 85) + Color(170, 170, 170);
-```
-
-### Subtraction (Color Removal)
-```cpp
-Color cyan = Color(255, 255, 255) - Color(255, 0, 0);  // White - Red
-```
-
-### Gradient Interpolation
-```cpp
-Color mid = color1.gradient(color2, 128);  // 50% between color1 and color2
-```
-
-### Fade Effects
-```cpp
-Color faded_black = color.fade_to_black(200);  // Fade 78% toward black
-Color faded_white = color.fade_to_white(100);  // Fade 39% toward white
-```
-
-### Lighten/Darken
-```cpp
-Color lighter = color.lighten(50);   // Add 50 to each channel
-Color darker = color.darken(50);     // Subtract 50 from each channel
-```
-
-The library internally uses the multiplication operator (`*`) to apply the wave brightness effect, making the code cleaner and more efficient.
+This project uses:
+- [ESPHome](https://esphome.io/) for device firmware
+- [SCD4x component](https://esphome.io/components/sensor/scd4x.html) for sensor integration
+- [NeoPixelBus](https://esphome.io/components/light/neopixelbus.html) for LED control
+- [aare.guru API](https://aare.guru/) for river data
 
 ## License
 
-This library is provided as-is for use with ESPHome projects.
+This project is open source. Feel free to modify and adapt for your own environmental monitoring needs.
+
+---
+
+*For more advanced ESPHome configurations and LED effects, check out the [ESPHome documentation](https://esphome.io/).*
