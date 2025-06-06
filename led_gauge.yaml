@@ -1,0 +1,603 @@
+esphome:
+  name: led-gauge
+  friendly_name: LED Gauge
+  includes:
+    - led_gauge.h
+  on_boot:
+    - priority: 550.0
+      then:
+        - lambda: |-
+            // Initialize global variables for trend calculations with NaN
+            id(co2_last) = NAN;
+            id(temp_last) = NAN;
+            id(hum_last) = NAN;
+        - light.turn_on:
+            id: gauge
+            effect: "CO₂"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_encryption
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  use_address: 192.168.178.201
+
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Co2-Monitor Fallback Hotspot"
+    password: "23aa2JsDehYT"
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 3
+
+# ─────────── HTTP Request Component ───────────
+http_request:
+  verify_ssl: false
+  timeout: 10s
+
+# ─────────── Scripts ───────────
+script:
+  - id: fetch_aare_data
+    then:
+      - http_request.get:
+          url: "https://aareguru.existenz.ch/v2018/current?values=aare.temperature,aare.temperature_text,aare.flow,aare.flow_text,aare.height"
+          capture_response: true
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code == 200) {
+                    ESP_LOGI("aare", "Response received, length: %d bytes", body.length());
+                    ESP_LOGD("aare", "Response body: %s", body.c_str());
+
+                    if (body.length() == 0) {
+                      ESP_LOGE("aare", "Empty response body received");
+                      return;
+                    }
+
+                    // Parse the response - each value is on a separate line
+                    std::string response_str = body;
+                    std::vector<std::string> lines;
+
+                    // Split by newlines
+                    size_t start = 0;
+                    size_t end = 0;
+                    while ((end = response_str.find('\n', start)) != std::string::npos) {
+                      std::string line = response_str.substr(start, end - start);
+                      if (!line.empty() && line != "\r") {
+                        lines.push_back(line);
+                      }
+                      start = end + 1;
+                    }
+                    // Add the last line if it doesn't end with newline
+                    if (start < response_str.length()) {
+                      std::string line = response_str.substr(start);
+                      if (!line.empty() && line != "\r") {
+                        lines.push_back(line);
+                      }
+                    }
+
+                    if (lines.size() >= 5) {
+                      float temp = atof(lines[0].c_str());
+                      std::string temp_text = lines[1];
+                      float flow = atof(lines[2].c_str());
+                      std::string flow_text = lines[3];
+                      float height = atof(lines[4].c_str());
+
+                      ESP_LOGI("aare", "Aare - Temp: %.1f°C (%s), Flow: %.0f (%s), Height: %.2fm",
+                               temp, temp_text.c_str(), flow, flow_text.c_str(), height);
+
+                      // Update sensor values
+                      id(aare_temp).publish_state(temp);
+                      id(aare_temp_text).publish_state(temp_text);
+                      id(aare_flow).publish_state(flow);
+                      id(aare_flow_text).publish_state(flow_text);
+                      id(aare_height).publish_state(height);
+                    } else {
+                      ESP_LOGE("aare", "Expected 5 lines, got %d", lines.size());
+                      for (int i = 0; i < lines.size(); i++) {
+                        ESP_LOGD("aare", "Line %d: %s", i, lines[i].c_str());
+                      }
+                    }
+                  } else {
+                    ESP_LOGE("aare", "HTTP request failed with status %d", response->status_code);
+                    ESP_LOGD("aare", "Error response body: %s", body.c_str());
+                  }
+          on_error:
+            then:
+              - logger.log: "Aare API request failed!"
+
+# ─────────── SCD4x Sensor Configuration ───────────
+# Uncomment this section when you're ready to use the actual SCD4x sensor
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+  id: bus_a
+
+### Wireguard
+
+# Example configuration entry
+wireguard:
+  address: 192.168.178.201
+  private_key: !secret wireguard_private_key
+  netmask: 255.255.255.0
+
+  peer_endpoint: !secret wireguard_peer_endpoint
+  peer_port: 59041
+  peer_public_key: !secret wireguard_peer_public_key
+  peer_preshared_key: !secret wireguard_peer_preshared_key
+  # peer_allowed_ips:
+  #  - 192.168.178.0/24
+  peer_persistent_keepalive: 25s
+
+# NTP
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Zurich
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+      - 2.pool.ntp.org
+
+# ─────────── Interval for calculating trends ───────────
+interval:
+  # Calculate trends every 5 minutes
+  - interval: 5min
+    then:
+      - lambda: |-
+          float interval = 300.0f;  // 5 minutes in seconds
+
+          // CO₂ trend
+          float co2_now = id(co2).state;
+          if (!isnan(co2_now) && !isnan(id(co2_last))) {
+            float co2_change = (co2_now - id(co2_last)) / interval;
+            id(co2_trend).publish_state(co2_change);
+            id(co2_last) = co2_now;
+          }
+
+          // Temperature trend
+          float temp_now = id(temp).state;
+          if (!isnan(temp_now) && !isnan(id(temp_last))) {
+            float temp_change = (temp_now - id(temp_last)) / interval;
+            id(temp_trend).publish_state(temp_change);
+            id(temp_last) = temp_now;
+          }
+
+          // Humidity trend
+          float now_hum = id(hum).state;
+          if (!isnan(now_hum) && !isnan(id(hum_last))) {
+            float hum_change = (now_hum - id(hum_last)) / interval;
+            id(hum_trend).publish_state(hum_change);
+            id(hum_last) = now_hum;
+          }
+
+  # Fetch Aare temperature every 10 minutes
+  - interval: 10min
+    then:
+      - script.execute: fetch_aare_data
+
+# ─────────── LED Light  ───────────
+light:
+  - platform: neopixelbus
+    type: GRB
+    variant: WS2812
+    pin: GPIO12
+    num_leds: 12
+    name: "Gauge"
+    id: gauge
+    icon: mdi:led-strip
+    effects:
+      - addressable_lambda:
+          name: "CO₂"
+          update_interval: 50ms
+          lambda: |-
+            // Get CO₂ value and normalize to 0-1 range
+            float val = id(co2).state;
+            float min = id(co2_min).state;
+            float max = id(co2_max).state;
+            float trend = id(co2_trend).state;
+
+            // Check if all required values are available
+            if (isnan(val) || isnan(min) || isnan(max)) {
+              // Turn off all LEDs if data not available
+              it.all() = Color::BLACK;
+              return;
+            }
+
+            float normalized_val = remap(val, min, max, 0.0f, 1.0f);
+            float normalized_trend = isnan(trend) ? 0.0f : clamp(trend / 100.0f, -1.0f, 1.0f);
+
+            // Define gradient colors: green → yellow → red
+            Color c1(0, 255, 0);      // Green
+            Color c2(255, 255, 0);    // Yellow
+            Color c3(255, 0, 0);      // Red
+
+            // Call the gauge function
+            led_gauge_simple(it, normalized_val, c1, c2, c3, normalized_trend);
+
+      - addressable_lambda:
+          name: "Temperature"
+          update_interval: 50ms
+          lambda: |-
+            // Get temperature value and normalize to 0-1 range
+            float val = id(temp).state;
+            float min = id(temp_min).state;
+            float max = id(temp_max).state;
+            float trend = id(temp_trend).state;
+
+            // Check if all required values are available
+            if (isnan(val) || isnan(min) || isnan(max)) {
+              it.all() = Color::BLACK;
+              return;
+            }
+
+            float normalized_value = remap(val, min, max, 0.0f, 1.0f);
+            float normalized_trend = isnan(trend) ? 0.0f : clamp(trend / 10.0f, -1.0f, 1.0f);
+
+            // Define gradient colors: blue → cyan → red
+            Color c1(0, 0, 255);      // Blue (cold)
+            Color c2(0, 255, 255);    // Cyan (moderate)
+            Color c3(255, 0, 0);      // Red (hot)
+
+            // Call the gauge function
+            led_gauge_simple(it, normalized_value, c1, c2, c3, normalized_trend);
+
+      - addressable_lambda:
+          name: "Humidity"
+          update_interval: 50ms
+          lambda: |-
+            // Get humidity value and normalize to 0-1 range
+            float val = id(hum).state;
+            float min = id(hum_min).state;
+            float max = id(hum_max).state;
+            float trend = id(hum_trend).state;
+
+            // Check if all required values are available
+            if (isnan(val) || isnan(min) || isnan(max)) {
+              // Turn off all LEDs if data not available
+              it.all() = Color::BLACK;
+              return;
+            }
+
+            float normalized_val = remap(val, min, max, 0.0f, 1.0f);
+            float normalized_tend = isnan(trend) ? 0.0f : clamp(trend / 20.0f, -1.0f, 1.0f);
+
+            // Define gradient colors: white → blue → purple
+            Color c1(255, 255, 255);  // White (dry)
+            Color c2(0, 100, 255);    // Blue (moderate)
+            Color c3(128, 0, 255);    // Purple (humid)
+
+            // Call the gauge function
+            led_gauge_simple(it, normalized_val, c1, c2, c3, normalized_tend);
+
+      - addressable_lambda:
+          name: "Aare Temperature"
+          update_interval: 50ms
+          lambda: |-
+            // Get Aare temperature and flow with configurable ranges
+            float temp = id(aare_temp).state;
+            float temp_min = id(aare_temp_min).state;
+            float temp_max = id(aare_temp_max).state;
+            float flow = id(aare_flow).state;
+            float flow_min = id(aare_flow_min).state;
+            float flow_max = id(aare_flow_max).state;
+
+            // Check if required values are available
+            if (isnan(temp) || isnan(flow) || isnan(temp_min) || isnan(temp_max) || isnan(flow_min) || isnan(flow_max)) {
+              it.all() = Color::BLACK;
+              return;
+            }
+
+            float normalized_temp = remap(temp, temp_min, temp_max, 0.0f, 1.0f);
+            float normalized_flow = remap(flow, flow_min, flow_max, 0.0f, 1.0f);
+
+            // Define gradient colors: light emerald → emerald → deep emerald
+            Color c1(144, 238, 144);     // Light green (cold water)
+            Color c2(46, 204, 113);      // Emerald green (moderate)
+            Color c3(39, 174, 96);       // Deep emerald (warmer)
+
+            // Call the gauge function
+            led_gauge_simple(it, normalized_temp, c1, c2, c3, normalized_flow);
+
+# ─────────── Sensors ───────────
+sensor:
+  ### SCD41
+
+  - platform: scd4x
+    co2:
+      name: "CO₂ Sensor"
+      id: co2
+
+    temperature:
+      name: "Temperature Sensor"
+      id: temp
+
+    humidity:
+      name: "Humidity Sensor"
+      id: hum
+
+    update_interval: 5s
+    measurement_mode: periodic
+    i2c_id: bus_a
+
+  ### Trends
+
+  - platform: template
+    name: "CO₂ Trend"
+    id: co2_trend
+    unit_of_measurement: "ppm/min"
+    device_class: carbon_dioxide
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:trending-up
+    entity_category: diagnostic
+    lambda: return {};
+
+  - platform: template
+    name: "Temperature Trend"
+    id: temp_trend
+    unit_of_measurement: "°C/min"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 2
+    icon: mdi:trending-up
+    entity_category: diagnostic
+    lambda: return 4.0;
+
+  - platform: template
+    name: "Humidity Trend"
+    id: hum_trend
+    unit_of_measurement: "%/min"
+    device_class: humidity
+    state_class: measurement
+    accuracy_decimals: 2
+    icon: mdi:water-percent
+    entity_category: diagnostic
+    lambda: return 10.0;
+
+  ### Aare Temperature
+
+  - platform: template
+    name: "Aare Temperature"
+    id: aare_temp
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:waves
+    lambda: return {};
+
+  ### Aare Flow
+
+  - platform: template
+    name: "Aare Flow"
+    id: aare_flow
+    unit_of_measurement: "m³/s"
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:waves-arrow-right
+    lambda: return {};
+
+  ### Aare Height
+
+  - platform: template
+    name: "Aare Height"
+    id: aare_height
+    unit_of_measurement: "m"
+    state_class: measurement
+    accuracy_decimals: 2
+    icon: mdi:chart-line-variant
+    lambda: return {};
+
+# ─────────── Numbers for Configuration ───────────
+number:
+  ### CO₂ Configuration
+
+  - platform: template
+    name: "CO₂ Min Value"
+    id: co2_min
+    min_value: 0
+    max_value: 3000
+    initial_value: 100
+    step: 100
+    unit_of_measurement: "ppm"
+    optimistic: true
+    restore_value: true
+    mode: BOX
+    device_class: carbon_dioxide
+    icon: mdi:molecule-co2
+    entity_category: config
+
+  - platform: template
+    name: "CO₂ Max Value"
+    id: co2_max
+    min_value: 100
+    max_value: 3000
+    initial_value: 2000
+    step: 100
+    unit_of_measurement: "ppm"
+    optimistic: true
+    restore_value: true
+    mode: BOX
+    device_class: carbon_dioxide
+    icon: mdi:molecule-co2
+    entity_category: config
+
+  ### Temperature Configuration
+
+  - platform: template
+    name: "Temperature Min"
+    id: temp_min
+    min_value: -20
+    max_value: 50
+    initial_value: 10
+    step: 1
+    unit_of_measurement: "°C"
+    optimistic: true
+    restore_value: true
+    mode: BOX
+    device_class: temperature
+    icon: mdi:thermometer-low
+    entity_category: config
+
+  - platform: template
+    name: "Temperature Max"
+    id: temp_max
+    min_value: -20
+    max_value: 50
+    initial_value: 30
+    step: 1
+    unit_of_measurement: "°C"
+    optimistic: true
+    restore_value: true
+    mode: BOX
+    device_class: temperature
+    icon: mdi:thermometer-high
+    entity_category: config
+
+  ### Humidity Configuration
+
+  - platform: template
+    name: "Humidity Min"
+    id: hum_min
+    min_value: 0
+    max_value: 100
+    initial_value: 50
+    step: 1
+    unit_of_measurement: "%"
+    optimistic: true
+    restore_value: true
+    mode: BOX
+    device_class: humidity
+    icon: mdi:water-percent
+    entity_category: config
+
+  - platform: template
+    name: "Humidity Max"
+    id: hum_max
+    min_value: 0
+    max_value: 100
+    initial_value: 90
+    step: 1
+    unit_of_measurement: "%"
+    optimistic: true
+    restore_value: true
+    mode: BOX
+    device_class: humidity
+    icon: mdi:water-percent
+    entity_category: config
+
+  ### Aare Configuration
+
+  - platform: template
+    name: "Aare Temperature Min"
+    id: aare_temp_min
+    min_value: 0
+    max_value: 20
+    initial_value: 1
+    step: 1
+    unit_of_measurement: "°C"
+    optimistic: true
+    restore_value: true
+    mode: BOX
+    device_class: temperature
+    icon: mdi:thermometer-low
+    entity_category: config
+
+  - platform: template
+    name: "Aare Temperature Max"
+    id: aare_temp_max
+    min_value: 15
+    max_value: 35
+    initial_value: 24
+    step: 1
+    unit_of_measurement: "°C"
+    optimistic: true
+    restore_value: true
+    mode: BOX
+    device_class: temperature
+    icon: mdi:thermometer-high
+    entity_category: config
+
+  - platform: template
+    name: "Aare Flow Min"
+    id: aare_flow_min
+    min_value: 0
+    max_value: 200
+    initial_value: 50
+    step: 10
+    unit_of_measurement: "m³/s"
+    optimistic: true
+    restore_value: true
+    mode: BOX
+    icon: mdi:waves-arrow-right
+    entity_category: config
+
+  - platform: template
+    name: "Aare Flow Max"
+    id: aare_flow_max
+    min_value: 200
+    max_value: 600
+    initial_value: 560
+    step: 10
+    unit_of_measurement: "m³/s"
+    optimistic: true
+    restore_value: true
+    mode: BOX
+    icon: mdi:waves-arrow-right
+    entity_category: config
+
+# ─────────── Text Sensors for Aare Descriptions ───────────
+text_sensor:
+  - platform: template
+    name: "Aare Temperature Text"
+    id: aare_temp_text
+    icon: mdi:thermometer-water
+
+  - platform: template
+    name: "Aare Flow Text"
+    id: aare_flow_text
+    icon: mdi:waves-arrow-right
+
+# ─────────── Button for Manual Aare Update ───────────
+button:
+  - platform: template
+    name: "Update Aare Temperature"
+    icon: mdi:refresh
+    on_press:
+      - script.execute: fetch_aare_data
+
+# ─────────── Globals ───────────
+globals:
+  - id: co2_last
+    type: float
+    initial_value: "NAN"
+
+  - id: temp_last
+    type: float
+    initial_value: "NAN"
+
+  - id: hum_last
+    type: float
+    initial_value: "NAN"
